@@ -697,313 +697,37 @@
   window.TidyTabsDev = Object.assign(window.TidyTabsDev || {}, { callLLM, PROVIDERS });
 
   const askAIForMultipleTopics = async (tabs) => {
-    if (!Array.isArray(tabs) || tabs.length === 0) return [];
+    if (!PREFS.enabled()) return [];
+    if (!Array.isArray(tabs)) return [];
 
     const validTabs = tabs.filter((tab) => tab?.isConnected);
-    if (!validTabs.length) return [];
+    if (validTabs.length < 2) return [];
 
-    const currentWorkspaceId = window.gZenWorkspaces?.activeWorkspace;
-    const result = [];
-    const ungroupedTabs = [];
+    const workspaceId = window.gZenWorkspaces?.activeWorkspace;
+    const tabInfos = validTabs.map((tab, index) => ({
+      index,
+      title: getTabTitle(tab),
+      url: getTabUrl(tab),
+    }));
+    const existing = getExistingGroupNames(workspaceId);
+    const prompt = buildPrompt(tabInfos, existing);
 
-    // Get existing groups in current workspace
-    const existingWorkspaceGroups = new Map();
-    if (currentWorkspaceId) {
-      const groupSelector = `tab-group:has(tab[zen-workspace-id="${currentWorkspaceId}"])`;
-      document.querySelectorAll(groupSelector).forEach((groupEl) => {
-        const label = groupEl.getAttribute("label");
-        if (label) {
-          // Get tabs in this group to calculate group embedding
-          const groupTabs = Array.from(groupEl.querySelectorAll('tab')).filter(tab => 
-            tab.getAttribute("zen-workspace-id") === currentWorkspaceId
-          );
-          if (groupTabs.length > 0) {
-            existingWorkspaceGroups.set(label, {
-              element: groupEl,
-              tabs: groupTabs,
-              tabTitles: groupTabs.map(tab => getTabTitle(tab))
-            });
-          }
-        }
-      });
+    let groups;
+    try {
+      groups = await callLLM(prompt);
+    } catch (e) {
+      console.error("[TabSort][AI] grouping failed:", (e && e.message) || e);
+      startFailureAnimation();
+      return [];
     }
 
-    // Process tabs in batches for better performance
-    const tabTitles = validTabs.map((tab) => getTabTitle(tab));
-    const embeddings = await processTabsInBatches(validTabs);
-
-    // Calculate embeddings for existing workspace groups
-    const existingGroupEmbeddings = new Map();
-    for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-      try {
-        const groupTabEmbeddings = await processTabsInBatches(groupInfo.tabs);
-        const validGroupEmbeddings = groupTabEmbeddings.filter(emb => 
-          Array.isArray(emb) && emb.length > 0
-        );
-        if (validGroupEmbeddings.length > 0) {
-          const avgEmbedding = averageEmbedding(validGroupEmbeddings);
-          existingGroupEmbeddings.set(groupName, avgEmbedding);
-        }
-      } catch (e) {
-        console.error(`[TabSort] Error calculating embedding for existing group "${groupName}":`, e);
-      }
-    }
-
-    // Enhanced matching: try to match tabs to existing groups
-    for (let i = 0; i < validTabs.length; i++) {
-      const tab = validTabs[i];
-      const tabEmbedding = embeddings[i];
-      const tabTitle = tabTitles[i];
-
-      if (!tabEmbedding) {
-        ungroupedTabs.push(tab);
-        continue;
-      }
-
-      let bestMatch = null;
-      let bestSimilarity = 0;
-
-      // Check against current workspace groups
-      for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-        const groupEmbedding = existingGroupEmbeddings.get(groupName);
-        if (!groupEmbedding) continue;
-
-        let similarity = cosineSimilarity(tabEmbedding, groupEmbedding);
-        similarity += CONFIG.EXISTING_GROUP_BOOST; // Always boost existing groups
-
-        if (similarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && similarity > bestSimilarity) {
-          bestMatch = { 
-            groupData: { groupName }, 
-            similarity,
-            isExistingGroup: true
-          };
-          bestSimilarity = similarity;
-        }
-      }
-
-      // Additional semantic matching for existing groups using title similarity
-      if (!bestMatch || bestMatch.similarity < 0.8) {
-        for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-          // Check if tab title has semantic similarity to group tabs
-          const titleSimilarities = groupInfo.tabTitles.map(groupTabTitle => {
-            const distance = levenshteinDistance(tabTitle.toLowerCase(), groupTabTitle.toLowerCase());
-            const maxLen = Math.max(tabTitle.length, groupTabTitle.length);
-            return maxLen > 0 ? 1 - (distance / maxLen) : 0;
-          });
-
-          const maxTitleSimilarity = Math.max(...titleSimilarities);
-          
-          // If we find strong title similarity, consider it a match
-          if (maxTitleSimilarity > 0.7) {
-            const adjustedSimilarity = maxTitleSimilarity * 0.8 + CONFIG.EXISTING_GROUP_BOOST;
-            if (adjustedSimilarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && adjustedSimilarity > bestSimilarity) {
-              bestMatch = { 
-                groupData: { groupName }, 
-                similarity: adjustedSimilarity,
-                isExistingGroup: true,
-                matchType: 'title'
-              };
-              bestSimilarity = adjustedSimilarity;
-            }
-          }
-        }
-      }
-
-      if (bestMatch) {
-        // Add tab to existing group
-        result.push({ tab, topic: bestMatch.groupData.groupName });
-        console.log(`[TabSort] Matched "${tabTitle}" to existing group "${bestMatch.groupData.groupName}" (similarity: ${bestMatch.similarity.toFixed(3)}, type: ${bestMatch.matchType || 'embedding'})`);
-      } else {
-        ungroupedTabs.push(tab);
-      }
-    }
-
-    console.log(`[TabSort] Matched ${result.length} tabs to existing groups, ${ungroupedTabs.length} tabs remain ungrouped`);
-
-    // Second pass: cluster remaining ungrouped tabs (only if we have enough)
-    if (ungroupedTabs.length > 1) {
-      const ungroupedEmbeddings = await processTabsInBatches(ungroupedTabs);
-
-      // Filter out empty embeddings
-      const validEmbeddings = ungroupedEmbeddings.filter(
-        (emb) => Array.isArray(emb) && emb.length > 0
-      );
-      const validIndices = ungroupedEmbeddings
-        .map((emb, idx) => (Array.isArray(emb) && emb.length > 0 ? idx : -1))
-        .filter((idx) => idx !== -1);
-
-      if (validEmbeddings.length > 1) {
-        // Cluster the ungrouped tabs
-        const allGroups = clusterEmbeddings(
-          validEmbeddings,
-          CONFIG.SIMILARITY_THRESHOLD
-        );
-        const groups = allGroups.filter(
-          (group) => Array.isArray(group) && group.length > 1
-        );
-
-        if (groups.length > 0) {
-          // Extract keywords function
-          function extractKeywords(titles) {
-            const allWords = titles
-              .join(" ")
-              .toLowerCase()
-              .replace(/[^\w\s]/g, " ")
-              .split(/\s+/)
-              .filter((word) => word.length > 2);
-
-            const wordCount = {};
-            allWords.forEach((word) => {
-              wordCount[word] = (wordCount[word] || 0) + 1;
-            });
-
-            const stopWords = new Set([
-              "the",
-              "and",
-              "for",
-              "are",
-              "but",
-              "not",
-              "you",
-              "all",
-              "can",
-              "had",
-              "her",
-              "was",
-              "one",
-              "our",
-              "out",
-              "day",
-              "get",
-              "has",
-              "him",
-              "his",
-              "how",
-              "man",
-              "new",
-              "now",
-              "old",
-              "see",
-              "two",
-              "way",
-              "who",
-              "boy",
-              "did",
-              "its",
-              "let",
-              "put",
-              "say",
-              "she",
-              "too",
-              "use",
-            ]);
-
-            const keywords = Object.entries(wordCount)
-              .filter(([word]) => !stopWords.has(word))
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 5)
-              .map(([word]) => word);
-
-            return keywords;
-          }
-
-          // Group naming function
-          async function nameGroupWithSmartTabTopic(titles) {
-            const keywords = extractKeywords(titles);
-            const input = `Topic from keywords: ${keywords.join(
-              ", "
-            )}. titles:\n${titles.join("\n")}`;
-
-            try {
-              const { createEngine } = ChromeUtils.importESModule(
-                "chrome://global/content/ml/EngineProcess.sys.mjs"
-              );
-              let engine = await createEngine({
-                taskName: "text2text-generation",
-                modelId: "Mozilla/smart-tab-topic",
-                modelHub: "huggingface",
-                engineId: "group-namer",
-              });
-
-              const aiResult = await engine.run({
-                args: [input],
-                options: { max_new_tokens: 8, temperature: 0.7 },
-              });
-
-              let name = (aiResult[0]?.generated_text || "Group")
-                .split("\n")
-                .map((l) => l.trim())
-                .find((l) => l);
-
-              name = toTitleCase(name);
-              if (!name || /none|adult content/i.test(name)) {
-                name = titles[0].split("–")[0].trim().slice(0, 24);
-              }
-
-              name = name
-                .replace(/^['"`]+|['"`]+$/g, "")
-                .replace(/[.?!,:;]+$/, "")
-                .slice(0, 24);
-              return name || "Group";
-            } catch (e) {
-              console.error("[TabSort][AI] Error naming group:", e);
-              return "Group";
-            }
-          }
-
-          // Process each new group
-          for (let groupIdx = 0; groupIdx < groups.length; groupIdx++) {
-            const group = groups[groupIdx];
-            const groupTabs = group.map(
-              (idx) => ungroupedTabs[validIndices[idx]]
-            );
-            const groupTitles = groupTabs.map((tab) => getTabTitle(tab));
-
-            // Check if this new group would be similar to an existing group
-            let shouldCreateNewGroup = true;
-            let targetExistingGroup = null;
-
-            if (groupTabs.length >= 2) {
-              const groupEmbeddings = group.map((idx) => validEmbeddings[idx]);
-              const avgEmbedding = averageEmbedding(groupEmbeddings);
-
-              // Check similarity to existing groups one more time with the averaged embedding
-              for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-                const existingEmbedding = existingGroupEmbeddings.get(groupName);
-                if (existingEmbedding) {
-                  const similarity = cosineSimilarity(avgEmbedding, existingEmbedding) + CONFIG.EXISTING_GROUP_BOOST;
-                  if (similarity > CONFIG.GROUP_SIMILARITY_THRESHOLD * 0.9) { // Slightly lower threshold for group-to-group matching
-                    shouldCreateNewGroup = false;
-                    targetExistingGroup = groupName;
-                    console.log(`[TabSort] Merging new group into existing group "${groupName}" (similarity: ${similarity.toFixed(3)})`);
-                    break;
-                  }
-                }
-              }
-            }
-
-            if (!shouldCreateNewGroup && targetExistingGroup) {
-              // Add all tabs to the existing group
-              groupTabs.forEach((tab) => {
-                result.push({ tab, topic: targetExistingGroup });
-              });
-            } else {
-              // Create new group
-              const groupName = await nameGroupWithSmartTabTopic(groupTitles);
-
-              // Add to result
-              groupTabs.forEach((tab) => {
-                result.push({ tab, topic: groupName });
-              });
-
-              console.log(`[TabSort] Created new group "${groupName}" with ${groupTabs.length} tabs`);
-            }
-          }
-        }
-      }
-    }
-
-    return result;
+    const pairs = dropSmallGroups(flattenGroups(groups, validTabs.length));
+    console.log(
+      `[TabSort][AI] ${PREFS.provider()} → ${pairs.length} tabs grouped into ${
+        new Set(pairs.map((p) => p.group)).size
+      } groups`
+    );
+    return pairs.map(({ index, group }) => ({ tab: validTabs[index], topic: group }));
   };
 
   // Animation cleanup utility
