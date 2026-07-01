@@ -359,6 +359,60 @@
     }
   };
 
+  // ===== Hosted-LLM grouping brain =====
+
+  // --- Preferences (single source of truth for pref keys) ---
+  const PREFS = {
+    _base: "extensions.tidy-tabs.",
+    _str(key, def) {
+      try {
+        return Services.prefs.getStringPref(this._base + key, def);
+      } catch (e) {
+        return def;
+      }
+    },
+    _bool(key, def) {
+      try {
+        return Services.prefs.getBoolPref(this._base + key, def);
+      } catch (e) {
+        return def;
+      }
+    },
+    enabled() {
+      return this._bool("enabled", true);
+    },
+    provider() {
+      return this._str("provider", "gemini");
+    },
+    geminiKey() {
+      return this._str("gemini_api_key", "").trim();
+    },
+    geminiModel() {
+      return this._str("gemini_model", "gemini-2.5-flash").trim() || "gemini-2.5-flash";
+    },
+    claudeKey() {
+      return this._str("claude_api_key", "").trim();
+    },
+    claudeModel() {
+      return this._str("claude_model", "claude-haiku-4-5").trim() || "claude-haiku-4-5";
+    },
+    openaiKey() {
+      return this._str("openai_api_key", "").trim();
+    },
+    openaiModel() {
+      return this._str("openai_model", "gpt-4o-mini").trim() || "gpt-4o-mini";
+    },
+    ollamaUrl() {
+      return this._str("ollama_url", "http://localhost:11434").trim() || "http://localhost:11434";
+    },
+    ollamaModel() {
+      return this._str("ollama_model", "llama3.1").trim() || "llama3.1";
+    },
+  };
+
+  // Dev handle for manual verification via the Browser Console.
+  window.TidyTabsDev = Object.assign(window.TidyTabsDev || {}, { PREFS });
+
   const askAIForMultipleTopics = async (tabs) => {
     if (!Array.isArray(tabs) || tabs.length === 0) return [];
 
