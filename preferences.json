@@ -1,9 +1,76 @@
 [
   {
     "type": "checkbox",
-    "label": "Enable AI",
-    "property": "browser.ml.enabled",
-    "force": true,
+    "label": "Enable AI sorting",
+    "property": "extensions.tidy-tabs.enabled",
     "defaultValue": true
+  },
+  {
+    "type": "dropdown",
+    "label": "AI Provider",
+    "property": "extensions.tidy-tabs.provider",
+    "defaultValue": "gemini",
+    "options": [
+      { "value": "gemini", "label": "Gemini (Google)" },
+      { "value": "claude", "label": "Claude (Anthropic)" },
+      { "value": "openai", "label": "OpenAI" },
+      { "value": "ollama", "label": "Ollama (local)" }
+    ]
+  },
+  {
+    "type": "string",
+    "label": "Gemini API Key",
+    "property": "extensions.tidy-tabs.gemini_api_key",
+    "placeholder": "AIza...",
+    "defaultValue": ""
+  },
+  {
+    "type": "string",
+    "label": "Gemini Model",
+    "property": "extensions.tidy-tabs.gemini_model",
+    "placeholder": "gemini-2.5-flash",
+    "defaultValue": "gemini-2.5-flash"
+  },
+  {
+    "type": "string",
+    "label": "Claude API Key",
+    "property": "extensions.tidy-tabs.claude_api_key",
+    "placeholder": "sk-ant-...",
+    "defaultValue": ""
+  },
+  {
+    "type": "string",
+    "label": "Claude Model",
+    "property": "extensions.tidy-tabs.claude_model",
+    "placeholder": "claude-haiku-4-5",
+    "defaultValue": "claude-haiku-4-5"
+  },
+  {
+    "type": "string",
+    "label": "OpenAI API Key",
+    "property": "extensions.tidy-tabs.openai_api_key",
+    "placeholder": "sk-...",
+    "defaultValue": ""
+  },
+  {
+    "type": "string",
+    "label": "OpenAI Model",
+    "property": "extensions.tidy-tabs.openai_model",
+    "placeholder": "gpt-4o-mini",
+    "defaultValue": "gpt-4o-mini"
+  },
+  {
+    "type": "string",
+    "label": "Ollama URL",
+    "property": "extensions.tidy-tabs.ollama_url",
+    "placeholder": "http://localhost:11434",
+    "defaultValue": "http://localhost:11434"
+  },
+  {
+    "type": "string",
+    "label": "Ollama Model",
+    "property": "extensions.tidy-tabs.ollama_model",
+    "placeholder": "llama3.1",
+    "defaultValue": "llama3.1"
   }
 ]
