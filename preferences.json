@@ -6,6 +6,12 @@
     "defaultValue": true
   },
   {
+    "type": "checkbox",
+    "label": "Fetch page descriptions (slower sort, better grouping)",
+    "property": "extensions.tidy-tabs.fetch_meta",
+    "defaultValue": true
+  },
+  {
     "type": "dropdown",
     "label": "AI Provider",
     "property": "extensions.tidy-tabs.provider",

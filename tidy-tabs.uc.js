@@ -270,6 +270,9 @@
     ollamaModel() {
       return this._str("ollama_model", "llama3.1").trim() || "llama3.1";
     },
+    fetchMeta() {
+      return this._bool("fetch_meta", true);
+    },
   };
 
   // Dev handle for manual verification via the Browser Console.
@@ -316,6 +319,26 @@
   };
 
   // --- Tab info extraction ---
+  const META_TIMEOUT_MS = 2000;
+
+  // Titles that carry no grouping signal — their tabs are excluded from sorting.
+  const JUNK_TITLES = new Set([
+    "",
+    "New Tab",
+    "Untitled Page",
+    "Invalid Tab",
+    "Error Processing Tab",
+    "Problem loading page",
+  ]);
+
+  // Boilerplate suffixes that bury the real subject of a tab title.
+  const NOISE_SUFFIXES = [
+    " - Google Search",
+    " - Google Maps",
+    " - YouTube",
+    " — YouTube",
+  ];
+
   const getTabUrl = (tab) => {
     try {
       const browser =
@@ -325,6 +348,96 @@
       const spec = browser?.currentURI?.spec || "";
       if (!spec || spec.startsWith("about:")) return "";
       return spec;
+    } catch (e) {
+      return "";
+    }
+  };
+
+  const getTabDomain = (url) => {
+    try {
+      if (!url) return "";
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch (e) {
+      return "";
+    }
+  };
+
+  // Strip a leading unread count "(12) " and known boilerplate suffixes.
+  const cleanTitle = (title) => {
+    let t = (title || "").replace(/^\(\d+\)\s*/, "");
+    for (const suffix of NOISE_SUFFIXES) {
+      if (t.endsWith(suffix)) {
+        t = t.slice(0, -suffix.length);
+        break;
+      }
+    }
+    return t.trim().replace(/\s+/g, " ");
+  };
+
+  const decodeEntities = (s) =>
+    (s || "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#0?39;/g, "'")
+      .replace(/&#x27;/gi, "'")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // Pull a description from raw page HTML (regex over the head — no DOM build).
+  const extractMeta = (html) => {
+    if (!html || typeof html !== "string") return "";
+    const head = html.slice(0, 30000);
+    const grab = (re) => {
+      const m = head.match(re);
+      return m ? m[1] : "";
+    };
+    const d =
+      grab(
+        /<meta[^>]+(?:name|property)=["']description["'][^>]*content=["']([^"']*)["']/i
+      ) ||
+      grab(
+        /<meta[^>]+content=["']([^"']*)["'][^>]*(?:name|property)=["']description["']/i
+      ) ||
+      grab(
+        /<meta[^>]+(?:name|property)=["']og:description["'][^>]*content=["']([^"']*)["']/i
+      ) ||
+      grab(
+        /<meta[^>]+content=["']([^"']*)["'][^>]*(?:name|property)=["']og:description["']/i
+      );
+    return decodeEntities(d).slice(0, 200);
+  };
+
+  // Re-fetch a tab's URL from the privileged chrome context (no CORS, no cookies)
+  // and extract its meta description. Bounded by META_TIMEOUT_MS; "" on any failure.
+  const fetchMeta = async (url) => {
+    try {
+      if (!url || !/^https?:/i.test(url)) return "";
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), META_TIMEOUT_MS);
+      let resp;
+      try {
+        resp = await fetch(url, {
+          signal: ctrl.signal,
+          credentials: "omit",
+          redirect: "follow",
+          headers: {
+            Accept: "text/html,application/xhtml+xml",
+            // Real-browser UA so sites serve the same HTML the user sees.
+            // In-browser this may be ignored (Firefox's own UA is already ideal);
+            // it mainly helps when the fetch runs outside a browser context.
+            "User-Agent":
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0",
+          },
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!resp.ok) return "";
+      const html = await resp.text();
+      return extractMeta(html);
     } catch (e) {
       return "";
     }
@@ -344,9 +457,11 @@
 
   // --- Prompt ---
   const buildPrompt = (tabInfos, existingGroupNames) => {
-    const lines = tabInfos.map(
-      (t) => `${t.index}. ${t.title}${t.url ? " — " + t.url : ""}`
-    );
+    const lines = tabInfos.map((t) => {
+      let line = `${t.index}. ${t.title}${t.domain ? " [" + t.domain + "]" : ""}`;
+      if (t.desc) line += `\n    ${t.desc}`;
+      return line;
+    });
     const existing =
       existingGroupNames && existingGroupNames.length
         ? `\nExisting groups (reuse one of these names whenever a tab fits it):\n${existingGroupNames
@@ -356,13 +471,17 @@
     return [
       "You organize a user's open browser tabs into a small number of clear, useful groups.",
       existing,
-      "Tabs (index. title — url):",
+      "Each tab is listed as: index. title [domain], optionally followed by an indented page description.",
+      "",
+      "Tabs:",
       lines.join("\n"),
       "",
       "How to group:",
+      "- Use the title, the [domain], and the description together to judge each tab's real subject — the description often reveals a topic the title alone hides.",
       "- Group tabs about the SAME subject, entity, task, or research thread. A search query, its result pages, related maps, menus, articles, docs, and repos about one thing ALL belong in the same group (e.g. a 'Grillo's Pickles' web search, its homepage, and a 'where to buy' page go together).",
       "- Prefer FEWER, BROADER groups over many tiny ones. If two would-be groups are really about the same underlying topic (one package manager, one restaurant, one car task), MERGE them into one.",
       "- Be COMPREHENSIVE: put every tab that clearly relates to at least one other tab into a group. Do not create a group and then leave obvious members of it ungrouped. Only omit a tab if it has no clear connection to any other tab.",
+      "- Do NOT group tabs merely because they share a domain (e.g. several github.com repos, or several google.com searches). The domain is a hint for identifying a tab's subject, not a reason to group. Group by the underlying subject only.",
       "- Reuse an existing group name (listed above) whenever a tab fits it, instead of inventing a near-duplicate.",
       "",
       "Naming:",
@@ -419,6 +538,10 @@
     flattenGroups,
     dropSmallGroups,
     getExistingGroupNames,
+    cleanTitle,
+    getTabDomain,
+    extractMeta,
+    fetchMeta,
   });
 
   // --- Providers ---
@@ -581,11 +704,28 @@
     const validTabs = tabs.filter((tab) => tab?.isConnected);
     if (validTabs.length < 2) return [];
 
+    // Drop tabs with no grouping signal: about:/blank/unreadable URLs (getTabUrl
+    // returns "") and generic/error titles. Index against this filtered list so
+    // the model's returned indices map back correctly.
+    const groupable = validTabs.filter((tab) => {
+      const url = getTabUrl(tab);
+      if (!url) return false;
+      return !JUNK_TITLES.has(getTabTitle(tab));
+    });
+    if (groupable.length < 2) return [];
+
+    const urls = groupable.map((tab) => getTabUrl(tab));
+    const metas = PREFS.fetchMeta()
+      ? await Promise.all(urls.map((u) => fetchMeta(u)))
+      : urls.map(() => "");
+
     const workspaceId = window.gZenWorkspaces?.activeWorkspace;
-    const tabInfos = validTabs.map((tab, index) => ({
+    const tabInfos = groupable.map((tab, index) => ({
       index,
-      title: getTabTitle(tab),
-      url: getTabUrl(tab),
+      title: cleanTitle(getTabTitle(tab)),
+      domain: getTabDomain(urls[index]),
+      url: urls[index],
+      desc: metas[index],
     }));
     const existing = getExistingGroupNames(workspaceId);
     const prompt = buildPrompt(tabInfos, existing);
@@ -599,13 +739,13 @@
       return [];
     }
 
-    const pairs = dropSmallGroups(flattenGroups(groups, validTabs.length));
+    const pairs = dropSmallGroups(flattenGroups(groups, groupable.length));
     console.log(
       `[TabSort][AI] ${PREFS.provider()} → ${pairs.length} tabs grouped into ${
         new Set(pairs.map((p) => p.group)).size
-      } groups`
+      } groups (${groupable.length} of ${validTabs.length} tabs considered)`
     );
-    return pairs.map(({ index, group }) => ({ tab: validTabs[index], topic: group }));
+    return pairs.map(({ index, group }) => ({ tab: groupable[index], topic: group }));
   };
 
   // Animation cleanup utility
